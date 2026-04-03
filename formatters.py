@@ -20,6 +20,28 @@ def get_nested(data: dict, *keys, default=0) -> Any:
 def esc(text):
     return html.escape(str(text))
 
+def format_match_list(matches: list, player_name: str) -> str:
+    if not matches:
+        return f"<b>No matches found for {player_name}</b>"
+    
+    lines = [
+        f"<b>🎮 Match History - {player_name}</b>",
+        "═" * 25,
+        ""
+    ]
+    
+    for i, match in enumerate(matches[:10], 1):
+        map_name = match.get("map_name", "Unknown")
+        outcome = match.get("outcome", "?")
+        score = match.get("score", [0, 0])
+        rating = match.get("leetify_rating", 0)
+        
+        emoji = "✅" if outcome == "win" else "❌" if outcome == "loss" else "➖"
+        
+        lines.append(f"{i}. {emoji} {map_name} | {score[0]}-{score[1]} | ⭐{rating:.2f}")
+    
+    return "\n".join(lines)
+
 def format_match_report(match_data: dict, tracked_players: list) -> str:
     game_id = match_data.get("id", "Unknown")
     date = match_data.get("date", "")
@@ -531,7 +553,7 @@ def format_player_list(players: list) -> str:
     return "\n".join(lines)
 
 def format_settings() -> str:
-    from config import POLLING_INTERVAL, WEEKLY_DIGEST_DAY, WEEKLY_DIGEST_HOUR
+    from config import POLLING_INTERVAL, WEEKLY_DIGEST_DAY, WEEKLY_DIGEST_HOUR, DISCORD_ENABLED, LOG_LEVEL
     
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     
@@ -540,6 +562,8 @@ def format_settings() -> str:
         "═" * 25,
         f"⏱️ Polling interval: <code>{POLLING_INTERVAL} seconds</code>",
         f"📅 Weekly digest: <code>{days[WEEKLY_DIGEST_DAY]} at {WEEKLY_DIGEST_HOUR}:00</code>",
+        f"📝 Logging: <code>{LOG_LEVEL}</code>",
+        f"💬 Discord: <code>{'Enabled' if DISCORD_ENABLED else 'Disabled'}</code>",
     ]
     
     return "\n".join(lines)
@@ -834,14 +858,62 @@ I'm your personal CS2 stats tracker. Here's what I can do:
 • /list - See all tracked players
 • /edit - Rename a player
 
-<b>🏆 Rankings</b>
-• /leaderboard - Weekly rankings
+<b>🏆 Rankings & Team</b>
+• /leaderboard - Global rankings
+• /leaderboard weekly - Weekly rankings
+• /pow /playerofweek - Player of the Week
+• /team /dashboard - Team dashboard
+• /myteam - Create team & view stats
+
+<b>🎲 Fun & AI</b>
+• /statofday - Random stat of the day
+• /analyze - AI profile analysis (shows player list)
+• /analyze [name] - Analyze specific player
+
+<b>👥 Team Features</b>
+• /myteam - Create team & view stats
+• /teststat - Test stat of the day
+• /testai - Test AI analysis
 
 <b>⚙️ Other</b>
+• /menu - Inline menu
 • /settings - Bot settings
 • /help - Show this message
 
 <i>Tip: Use /menu for a beautiful inline menu!</i>"""
 
 def format_help() -> str:
-    return format_welcome()
+    return """<b>📖 Help - All Commands</b>
+
+<b>📊 Stats Commands</b>
+• /stats - View player stats
+• /stats [name] - Stats for specific player
+• /match - Match history
+• /map - Map performance
+• /compare - Compare two players
+
+<b>👥 Player Management</b>
+• /add [id/url] - Add player to track
+• /remove [name] - Remove player
+• /list - List tracked players
+• /edit [old] [new] - Rename player
+
+<b>🏆 Leaderboard</b>
+• /leaderboard - All-time rankings
+• /leaderboard weekly - This week's rankings
+
+<b>⭐ Team Features</b>
+• /team - Team dashboard
+• /myteam - Create team & view stats
+• /pow - Player of the Week
+
+<b>🎲 Fun & AI</b>
+• /statofday - Random stat of the day
+• /analyze - AI player profile analysis
+• /analyze [name] - Analyze specific player
+
+<b>⚙️ Other</b>
+• /menu - Interactive menu
+• /ping - Check API connection
+• /settings - View settings
+• /help - Show this message"""

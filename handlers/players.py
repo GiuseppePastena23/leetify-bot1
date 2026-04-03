@@ -16,6 +16,10 @@ async def add_player_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
+    user = update.effective_user
+    user_id = user.id if user else None
+    username = user.username if user and user.username else ""
+    
     input_str = " ".join(context.args)
     client = leetify_client.client
     
@@ -46,16 +50,18 @@ async def add_player_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     steam_id = profile.get("steamId", "")
     
     if database.player_exists(leetify_id):
+        added_by = database.get_player_added_by(leetify_id)
         link = f"https://leetify.com/profile/{leetify_id}"
+        added_info = f"\n\nAdded by: @{added_by['added_by_username']}" if added_by and added_by.get('added_by_username') else ""
         await update.message.reply_text(
             f"<b>⚠️ Already Tracking</b>\n\n"
-            f"<a href='{link}'>{name}</a> is already being tracked.",
+            f"<a href='{link}'>{name}</a> is already being tracked.{added_info}",
             parse_mode="HTML",
             disable_web_page_preview=True
         )
         return
     
-    success = database.add_player(leetify_id, steam_id, name)
+    success = database.add_player(leetify_id, steam_id, name, added_by_user_id=user_id, added_by_username=username)
     if success:
         link = f"https://leetify.com/profile/{leetify_id}"
         await update.message.reply_text(

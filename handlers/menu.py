@@ -37,7 +37,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Select an option below:</b>"
     )
     
-    if hasattr(update, 'callback_query'):
+    if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
             welcome_text,

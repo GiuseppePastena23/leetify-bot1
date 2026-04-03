@@ -5,6 +5,7 @@ import database
 import leetify_client
 import formatters
 import config
+import discord_client
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ def check_for_new_matches():
         score_str = f"{score.get('ct', 0)}-{score.get('t', 0)}"
         database.mark_match_reported(game_id, score_str)
         
+        player_match_info = {}
+        
         for player in tracked:
             week_start = database.get_week_start()
             players_data = match_details.get("players", [])
@@ -87,37 +90,92 @@ def check_for_new_matches():
                         rating,
                         mvp
                     )
+                    
+                    player_match_info[player["leetify_id"]] = {
+                        "rating": rating,
+                        "isWin": is_win,
+                        "outcome": "Win" if is_win else "Loss"
+                    }
                     break
         
+        score = match_details.get("score", {})
+        match_info = {
+            "map_name": match_details.get("map_name", "Unknown"),
+            "score": f"{score.get('ct', 0)}-{score.get('t', 0)}",
+            "rating": 0,
+            "rating_change": 0,
+            "outcome": "Unknown"
+        }
+        
+        for leetify_id, info in player_match_info.items():
+            match_info["rating"] = info["rating"]
+            match_info["outcome"] = info["outcome"]
+        
         report = formatters.format_match_report(match_details, tracked)
-        new_reports.append(report)
+        new_reports.append({
+            "report": report,
+            "match_info": match_info,
+            "players": tracked
+        })
     
     return new_reports
 
-async def send_match_report(report: str):
+async def send_match_report(report: str, match_data: dict = None, players: list = None):
     if not bot:
         logger.error("Bot not initialized")
         return
     
-    if not config.CHAT_ID:
-        logger.error("CHAT_ID not configured")
-        return
+    if config.CHAT_ID:
+        try:
+            await bot.send_message(
+                chat_id=config.CHAT_ID,
+                text=report,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            logger.info(f"Sent match report to {config.CHAT_ID}")
+        except Exception as e:
+            logger.error(f"Failed to send match report: {e}")
     
-    try:
-        await bot.send_message(
-            chat_id=config.CHAT_ID,
-            text=report,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        logger.info(f"Sent match report to {config.CHAT_ID}")
-    except Exception as e:
-        logger.error(f"Failed to send match report: {e}")
+    if match_data and players and config.DISCORD_ENABLED:
+        for player in players:
+            try:
+                rating = match_data.get("rating", 0)
+                rating_change = match_data.get("rating_change", 0)
+                outcome = "Win" if match_data.get("isWin", False) else "Loss"
+                discord_client.send_match_alert(
+                    player_name=player.get("name", "Unknown"),
+                    match_result=outcome,
+                    rating=rating,
+                    rating_change=rating_change,
+                    map_name=match_data.get("map_name", "Unknown"),
+                    score=match_data.get("score", "0-0")
+                )
+            except Exception as e:
+                logger.error(f"Failed to send Discord alert: {e}")
 
 async def check_and_send_reports():
     try:
         reports = check_for_new_matches()
-        for report in reports:
+        for report_data in reports:
+            report = report_data.get("report", "")
             await send_match_report(report)
+            
+            if config.DISCORD_ENABLED:
+                for player in report_data.get("players", []):
+                    match_info = report_data.get("match_info", {})
+                    try:
+                        rating = match_info.get("rating", 0)
+                        rating_change = match_info.get("rating_change", 0)
+                        discord_client.send_match_alert(
+                            player_name=player.get("name", "Unknown"),
+                            match_result=match_info.get("outcome", "Unknown"),
+                            rating=rating,
+                            rating_change=rating_change,
+                            map_name=match_info.get("map_name", "Unknown"),
+                            score=match_info.get("score", "0-0")
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send Discord alert: {e}")
     except Exception as e:
         logger.error(f"Error in check_and_send_reports: {e}")

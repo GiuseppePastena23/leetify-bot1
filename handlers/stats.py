@@ -3,6 +3,8 @@ from telegram.ext import ContextTypes
 import database
 import leetify_client
 import formatters
+import config
+import discord_client
 
 def get_site_from_args(args):
     if not args:
@@ -255,6 +257,9 @@ async def compare_callback2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args if context.args else []
+    weekly = "weekly" in args or "-w" in args
+    
     players = database.get_all_players()
     
     if not players:
@@ -262,6 +267,53 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     client = leetify_client.client
+    
+    if weekly:
+        week_start = database.get_week_start()
+        stats = database.get_weekly_stats(week_start)
+        
+        if not stats:
+            await update.message.reply_text(
+                "<b>No weekly stats yet.</b>\n\nPlay some matches this week!",
+                parse_mode="HTML"
+            )
+            return
+        
+        week_stats = []
+        for p in stats:
+            matches = p.get("matches_played", 0)
+            wins = p.get("wins", 0)
+            week_stats.append({
+                "name": p.get("name", "Unknown"),
+                "matches": matches,
+                "wins": wins,
+                "losses": p.get("losses", 0),
+                "winrate": (wins / matches * 100) if matches > 0 else 0,
+                "avg_rating": p.get("rating_sum", 0) / matches if matches > 0 else 0
+            })
+        
+        by_rating = sorted(week_stats, key=lambda x: x.get("avg_rating", 0), reverse=True)
+        by_wr = sorted(week_stats, key=lambda x: x.get("winrate", 0), reverse=True)
+        
+        medals = ["🥇", "🥈", "🥉", "  ", "  "]
+        
+        lines = [
+            "<b>🏆 Weekly Leaderboard</b>",
+            "═" * 25,
+            ""
+        ]
+        
+        lines.append("<b>⭐ RATING:</b>")
+        for i, p in enumerate(by_rating[:5], 1):
+            lines.append(f"{medals[i-1]} {i}. {p['name']}: <code>{p['avg_rating']:.2f}</code> ({p['matches']} matches)")
+        lines.append("")
+        
+        lines.append("<b>🏆 WIN RATE:</b>")
+        for i, p in enumerate(by_wr[:5], 1):
+            lines.append(f"{medals[i-1]} {i}. {p['name']}: <code>{p['winrate']:.1f}%</code> ({p['wins']}-{p['losses']})")
+        
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
     
     player_stats = []
     
@@ -306,7 +358,785 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     for i, p in enumerate(by_matches[:5], 1):
         lines.append(f"{medals[i-1]} {i}. {p['name']}: <code>{p['matches']}</code>")
     
+    lines.append("")
+    lines.append("<i>Use /leaderboard weekly for weekly stats</i>")
+    
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    
+    import discord_client
+    if config.DISCORD_ENABLED:
+        discord_client.send_leaderboard("Leaderboard", [
+            {"rank": i+1, "name": p["name"], "rating": p.get("leetify_rating", 0), "winrate": p.get("winrate", 0)}
+            for i, p in enumerate(by_rating[:10])
+        ])
+
+async def player_of_week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import weekly_digest
+    
+    player = weekly_digest.get_player_of_the_week()
+    
+    if not player:
+        await update.message.reply_text(
+            "<b>❌ No player of the week yet.</b>\n\n"
+            "Need at least 3 matches played this week to qualify.",
+            parse_mode="HTML"
+        )
+        return
+    
+    text = (
+        f"⭐ <b>Player of the Week</b> ⭐\n"
+        "═" * 25 + "\n\n"
+        f"🏆 <b>{player['name']}</b>\n\n"
+        f"📊 Matches: {player['matches']}\n"
+        f"✅ Wins: {player['wins']}\n"
+        f"📈 Win Rate: {player['winrate']:.1f}%\n"
+        f"⭐ Avg Rating: {player['avg_rating']:.2f}\n"
+        f"🎯 K/D: {player['kd']:.2f}\n\n"
+        f"<i>Minimum 3 matches required to qualify</i>"
+    )
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def team_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    
+    if not players:
+        await update.message.reply_text(
+            "<b>❌ No players tracked.</b>\n\nUse <code>/add</code> to add players.",
+            parse_mode="HTML"
+        )
+        return
+    
+    client = leetify_client.client
+    
+    team_stats = {
+        "total_players": len(players),
+        "total_matches": 0,
+        "total_wins": 0,
+        "total_losses": 0,
+        "avg_rating": 0,
+        "avg_winrate": 0,
+        "total_kills": 0,
+        "total_deaths": 0,
+        "best_player": None,
+        "best_rating": 0
+    }
+    
+    ratings = []
+    
+    for player in players:
+        profile = client.get_player_profile(player["leetify_id"])
+        
+        if profile and "error" not in profile:
+            matches = profile.get("total_matches", 0)
+            winrate = profile.get("winrate", 0) * 100
+            rating = profile.get("ranks", {}).get("leetify", 0)
+            kills = profile.get("total_kills", 0)
+            deaths = profile.get("total_deaths", 0)
+            
+            wins = int(matches * winrate / 100)
+            
+            team_stats["total_matches"] += matches
+            team_stats["total_wins"] += wins
+            team_stats["total_losses"] += matches - wins
+            team_stats["total_kills"] += kills
+            team_stats["total_deaths"] += deaths
+            
+            ratings.append(rating)
+            
+            if rating > team_stats["best_rating"]:
+                team_stats["best_rating"] = rating
+                team_stats["best_player"] = player["name"]
+    
+    if ratings:
+        team_stats["avg_rating"] = sum(ratings) / len(ratings)
+    
+    if team_stats["total_matches"] > 0:
+        team_stats["avg_winrate"] = (team_stats["total_wins"] / team_stats["total_matches"]) * 100
+    
+    team_kd = team_stats["total_kills"] / team_stats["total_deaths"] if team_stats["total_deaths"] > 0 else 0
+    
+    text = (
+        f"<b>📊 Team Dashboard</b>\n"
+        "═" * 25 + "\n\n"
+        f"<b>👥 Players:</b> {team_stats['total_players']}\n"
+        f"<b>🎮 Total Matches:</b> {team_stats['total_matches']}\n"
+        f"<b>✅ Wins:</b> {team_stats['total_wins']}\n"
+        f"<b>❌ Losses:</b> {team_stats['total_losses']}\n"
+        f"<b>📈 Win Rate:</b> {team_stats['avg_winrate']:.1f}%\n\n"
+        f"<b>⭐ Average Rating:</b> {team_stats['avg_rating']:.2f}\n"
+        f"<b>🎯 Team K/D:</b> {team_kd:.2f}\n\n"
+        f"<b>🏆 Best Player:</b> {team_stats['best_player'] or 'N/A'}\n"
+        f"<b>   Rating:</b> {team_stats['best_rating']:.2f}"
+    )
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
+import random
+from datetime import datetime
+import hashlib
+
+_stat_cache = {}
+
+async def stat_of_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    
+    if not players:
+        await update.message.reply_text(
+            "<b>❌ No players tracked.</b>\n\nUse /add to add players first!",
+            parse_mode="HTML"
+        )
+        return
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"stat_{today}"
+    
+    if cache_key in _stat_cache:
+        stat_type, player_name, stat_value, description = _stat_cache[cache_key]
+    else:
+        client = leetify_client.client
+        player_data = []
+        
+        for player in players:
+            profile = client.get_player_profile(player["leetify_id"])
+            if profile and "error" not in profile:
+                player_data.append({
+                    "name": player["name"],
+                    "profile": profile
+                })
+        
+        if not player_data:
+            await update.message.reply_text("<b>❌ Could not fetch player stats.</b>", parse_mode="HTML")
+            return
+        
+        stat_types = ["hs", "adr", "rating", "winrate", "matches", "kd", "clutch", "multi"]
+        stat_type = random.choice(stat_types)
+        
+        best_player = None
+        best_value = -1
+        
+        for p in player_data:
+            profile = p["profile"]
+            
+            if stat_type == "hs":
+                hs = profile.get("headshot_percentage", 0) * 100
+                if hs > best_value:
+                    best_value = hs
+                    best_player = p["name"]
+                    stat_value = f"{hs:.1f}%"
+                    description = "headshot percentage"
+            
+            elif stat_type == "adr":
+                adr = profile.get("adr", 0)
+                if adr > best_value:
+                    best_value = adr
+                    best_player = p["name"]
+                    stat_value = f"{adr:.1f}"
+                    description = "average damage per round"
+            
+            elif stat_type == "rating":
+                rating = profile.get("ranks", {}).get("leetify", 0)
+                if rating > best_value:
+                    best_value = rating
+                    best_player = p["name"]
+                    stat_value = f"{rating:.2f}"
+                    description = "Leetify rating"
+            
+            elif stat_type == "winrate":
+                wr = profile.get("winrate", 0) * 100
+                matches = profile.get("total_matches", 0)
+                if matches >= 10 and wr > best_value:
+                    best_value = wr
+                    best_player = p["name"]
+                    stat_value = f"{wr:.1f}%"
+                    description = "win rate"
+            
+            elif stat_type == "matches":
+                matches = profile.get("total_matches", 0)
+                if matches > best_value:
+                    best_value = matches
+                    best_player = p["name"]
+                    stat_value = str(matches)
+                    description = "total matches"
+            
+            elif stat_type == "kd":
+                kills = profile.get("total_kills", 0)
+                deaths = profile.get("total_deaths", 1)
+                kd = kills / deaths if deaths > 0 else 0
+                if kd > best_value:
+                    best_value = kd
+                    best_player = p["name"]
+                    stat_value = f"{kd:.2f}"
+                    description = "K/D ratio"
+            
+            elif stat_type == "clutch":
+                clutches = profile.get("clutch_1v1_wins", 0) + profile.get("clutch_1v2_wins", 0) + profile.get("clutch_1v3_wins", 0)
+                if clutches > best_value:
+                    best_value = clutches
+                    best_player = p["name"]
+                    stat_value = str(clutches)
+                    description = "clutch wins"
+            
+            elif stat_type == "multi":
+                multi = profile.get("multi_2k", 0) + profile.get("multi_3k", 0) + profile.get("multi_4k", 0) + profile.get("multi_5k", 0)
+                if multi > best_value:
+                    best_value = multi
+                    best_player = p["name"]
+                    stat_value = str(multi)
+                    description = "multi-kills"
+        
+        if not best_player:
+            await update.message.reply_text("<b>❌ Not enough data for a stat.</b>", parse_mode="HTML")
+            return
+        
+        player_name = best_player
+        _stat_cache[cache_key] = (stat_type, player_name, stat_value, description)
+    
+    emojis = {
+        "hs": "🎯",
+        "adr": "💥",
+        "rating": "⭐",
+        "winrate": "🏆",
+        "matches": "🎮",
+        "kd": "⚔️",
+        "clutch": "😱",
+        "multi": "🔥"
+    }
+    
+    emoji = emojis.get(stat_type, "📊")
+    
+    text = (
+        f"<b>🎲 Stat of the Day</b>\n"
+        "═" * 25 + "\n\n"
+        f"{emoji} <b>{player_name}</b>\n"
+        f"Has the highest <b>{description}</b> on the team!\n\n"
+        f"📈 Value: <code>{stat_value}</code>\n\n"
+        f"<i>New stat every day at midnight</i>"
+    )
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def analyze_player_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    
+    if not players:
+        await update.message.reply_text(
+            "<b>❌ No players tracked.</b>\n\nUse /add to add players first!",
+            parse_mode="HTML"
+        )
+        return
+    
+    client = leetify_client.client
+    
+    if context.args:
+        name = " ".join(context.args)
+        player = database.get_player_by_name(name)
+        
+        if not player:
+            await update.message.reply_text(f"<b>❌ Player '{name}' not found.</b>", parse_mode="HTML")
+            return
+        
+        profile = client.get_player_profile(player["leetify_id"])
+        
+        if not profile or "error" in profile:
+            await update.message.reply_text("<b>❌ Could not fetch player profile.</b>", parse_mode="HTML")
+            return
+        
+        await send_ai_analysis(update, profile, player["name"])
+        return
+    
+    keyboard = []
+    for p in players:
+        keyboard.append([InlineKeyboardButton(f"🤖 {p['name']}", callback_data=f"ai_profile_{p['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("🎲 Random", callback_data="ai_profile_random")])
+    
+    await update.message.reply_text(
+        "<b>🤖 Select a player to analyze:</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+team_selections = {}
+
+async def myteam_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    
+    if not players:
+        await update.message.reply_text(
+            "<b>❌ No players tracked.</b>\n\nUse /add to add players first!",
+            parse_mode="HTML"
+        )
+        return
+    
+    if len(players) < 5:
+        await update.message.reply_text(
+            f"<b>❌ Need at least 5 players to create a team.</b>\n\nYou have {len(players)} players tracked.",
+            parse_mode="HTML"
+        )
+        return
+    
+    user_id = update.effective_user.id if update.effective_user else 0
+    team_selections[user_id] = []
+    
+    keyboard = []
+    for p in players:
+        keyboard.append([InlineKeyboardButton(f"➕ {p['name']}", callback_data=f"team_add_{p['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("✅ Done", callback_data="team_done")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="team_cancel")])
+    
+    text = (
+        "<b>👥 Create Your Team</b>\n"
+        "═" * 25 + "\n\n"
+        "Select exactly <b>5 players</b> for your team:\n\n"
+        "Selected: <code>0/5</code>"
+    )
+    
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+async def team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id if query.from_user else 0
+    data = query.data
+    
+    if data == "team_cancel":
+        if user_id in team_selections:
+            del team_selections[user_id]
+        await query.edit_message_text("<b>❌ Team selection cancelled.</b>", parse_mode="HTML")
+        return
+    
+    if data == "team_done":
+        if user_id not in team_selections or len(team_selections[user_id]) != 5:
+            await query.answer("Select exactly 5 players!", show_alert=True)
+            return
+        
+        await query.edit_message_text("<b>🔄 Calculating team stats...</b>", parse_mode="HTML")
+        
+        player_ids = team_selections[user_id]
+        players = [database.get_player_by_internal_id(pid) for pid in player_ids]
+        
+        text = await calculate_team_stats(players)
+        await query.message.reply_text(text, parse_mode="HTML")
+        
+        del team_selections[user_id]
+        return
+    
+    if data.startswith("team_add_"):
+        player_id = int(data.replace("team_add_", ""))
+        
+        if user_id not in team_selections:
+            team_selections[user_id] = []
+        
+        current = team_selections[user_id]
+        
+        if player_id in current:
+            await query.answer("Player already selected!", show_alert=True)
+            return
+        
+        if len(current) >= 5:
+            await query.answer("Already have 5 players!", show_alert=True)
+            return
+        
+        current.append(player_id)
+        
+        player = database.get_player_by_internal_id(player_id)
+        await query.answer(f"Added {player['name']}!", show_alert=False)
+        
+        players = database.get_all_players()
+        
+        keyboard = []
+        for p in players:
+            if p['id'] in current:
+                keyboard.append([InlineKeyboardButton(f"✅ {p['name']}", callback_data=f"team_add_{p['id']}")])
+            else:
+                keyboard.append([InlineKeyboardButton(f"➕ {p['name']}", callback_data=f"team_add_{p['id']}")])
+        
+        keyboard.append([InlineKeyboardButton("✅ Done", callback_data="team_done")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="team_cancel")])
+        
+        text = (
+            "<b>👥 Create Your Team</b>\n"
+            "═" * 25 + "\n\n"
+            "Select exactly <b>5 players</b> for your team:\n\n"
+            f"Selected: <code>{len(current)}/5</code>\n"
+            f"Players: {', '.join([database.get_player_by_internal_id(pid)['name'] for pid in current])}"
+        )
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+async def calculate_team_stats(players):
+    if not players:
+        return "<b>❌ No players found.</b>"
+    
+    client = leetify_client.client
+    
+    player_profiles = []
+    for p in players:
+        profile = client.get_player_profile(p["leetify_id"])
+        if profile and "error" not in profile:
+            player_profiles.append({"player": p, "profile": profile})
+    
+    if not player_profiles:
+        return "<b>❌ Could not fetch player profiles.</b>"
+    
+    total_matches = 0
+    total_wins = 0
+    total_kills = 0
+    total_deaths = 0
+    total_adr = 0
+    total_rating = 0
+    
+    map_stats = {}
+    
+    for pp in player_profiles:
+        profile = pp["profile"]
+        
+        matches = profile.get("total_matches", 0)
+        winrate = profile.get("winrate", 0)
+        kills = profile.get("total_kills", 0)
+        deaths = profile.get("total_deaths", 0)
+        adr = profile.get("adr", 0)
+        rating = profile.get("ranks", {}).get("leetify", 0)
+        
+        total_matches += matches
+        total_wins += int(matches * winrate)
+        total_kills += kills
+        total_deaths += deaths
+        total_adr += adr
+        total_rating += rating
+        
+        maps = profile.get("maps", {})
+        for map_name, stats in maps.items():
+            if map_name not in map_stats:
+                map_stats[map_name] = {"wins": 0, "matches": 0}
+            map_stats[map_name]["wins"] += stats.get("wins", 0)
+            map_stats[map_name]["matches"] += stats.get("matches", 0)
+    
+    num_players = len(player_profiles)
+    
+    avg_matches = total_matches // num_players
+    avg_wins = total_wins // num_players
+    avg_kd = total_kills / total_deaths if total_deaths > 0 else 0
+    avg_adr = total_adr / num_players
+    avg_rating = total_rating / num_players
+    overall_wr = (total_wins / total_matches * 100) if total_matches > 0 else 0
+    
+    best_maps = []
+    worst_maps = []
+    if map_stats:
+        map_list = []
+        for map_name, stats in map_stats.items():
+            wr = (stats["wins"] / stats["matches"] * 100) if stats["matches"] > 0 else 0
+            map_list.append((map_name, wr, stats["matches"]))
+        
+        map_list.sort(key=lambda x: x[1], reverse=True)
+        best_maps = map_list[:3]
+        worst_maps = map_list[-2:] if len(map_list) >= 2 else []
+    
+    lines = [
+        "<b>👥 Team Analysis</b>",
+        "═" * 30,
+        ""
+    ]
+    
+    lines.append("<b>📊 TEAM STATS:</b>")
+    lines.append(f"Players: <code>{num_players}</code>")
+    lines.append(f"Avg Matches: <code>{avg_matches}</code>")
+    lines.append(f"Win Rate: <code>{overall_wr:.1f}%</code>")
+    lines.append(f"Avg K/D: <code>{avg_kd:.2f}</code>")
+    lines.append(f"Avg ADR: <code>{avg_adr:.1f}</code>")
+    lines.append(f"Avg Rating: <code>{avg_rating:.2f}</code>")
+    lines.append("")
+    
+    if best_maps:
+        lines.append("<b>🗺️ BEST MAPS:</b>")
+        for m, wr, matches in best_maps:
+            if matches >= 5:
+                lines.append(f"  • {m}: <code>{wr:.1f}%</code> ({matches} matches)")
+        lines.append("")
+    
+    if worst_maps:
+        lines.append("<b>⚠️ MAPS TO WORK ON:</b>")
+        for m, wr, matches in worst_maps:
+            if matches >= 5:
+                lines.append(f"  • {m}: <code>{wr:.1f}%</code> ({matches} matches)")
+        lines.append("")
+    
+    lines.append("<b>🎯 PLAYER BREAKDOWN:</b>")
+    for pp in player_profiles:
+        p = pp["player"]
+        prof = pp["profile"]
+        rating = prof.get("ranks", {}).get("leetify", 0)
+        k = prof.get("total_kills", 0)
+        d = prof.get("total_deaths", 1)
+        kd = k / d if d > 0 else 0
+        adr = prof.get("adr", 0)
+        wr = prof.get("winrate", 0) * 100
+        
+        lines.append(f"  {p['name']}: <code>{rating:.2f}</code rating | <code>{kd:.2f}</code KD | <code>{adr:.0f}</code ADR | <code>{wr:.0f}%</code WR")
+    
+    return "\n".join(lines)
+
+async def send_ai_analysis(update, profile, player_name):
+    await update.message.reply_text(
+        f"<b>🤖 Analyzing {player_name}...</b>",
+        parse_mode="HTML"
+    )
+    
+    import ai_analysis
+    result = ai_analysis.analyze_player_profile(profile, player_name)
+    await update.message.reply_text(result, parse_mode="HTML")
+
+async def ai_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "ai_profile_random":
+        players = database.get_all_players()
+        if not players:
+            await query.edit_message_text("<b>❌ No players tracked.</b>", parse_mode="HTML")
+            return
+        
+        player = random.choice(players)
+        client = leetify_client.client
+        profile = client.get_player_profile(player["leetify_id"])
+        
+        if not profile or "error" in profile:
+            await query.edit_message_text("<b>❌ Could not fetch player profile.</b>", parse_mode="HTML")
+            return
+        
+        await query.edit_message_text(
+            f"<b>🤖 Analyzing {player['name']}...</b>",
+            parse_mode="HTML"
+        )
+        
+        import ai_analysis
+        result = ai_analysis.analyze_player_profile(profile, player["name"])
+        await query.message.reply_text(result, parse_mode="HTML")
+        return
+    
+    player_id = data.replace("ai_profile_", "")
+    
+    if not player_id.isdigit():
+        await query.answer("Invalid selection", show_alert=True)
+        return
+    
+    player = database.get_player_by_internal_id(int(player_id))
+    
+    if not player:
+        await query.edit_message_text("<b>❌ Player not found.</b>", parse_mode="HTML")
+        return
+    
+    client = leetify_client.client
+    profile = client.get_player_profile(player["leetify_id"])
+    
+    if not profile or "error" in profile:
+        await query.edit_message_text("<b>❌ Could not fetch player profile.</b>", parse_mode="HTML")
+        return
+    
+    await query.edit_message_text(
+        f"<b>🤖 Analyzing {player['name']}...</b>",
+        parse_mode="HTML"
+    )
+    
+    import ai_analysis
+    result = ai_analysis.analyze_player_profile(profile, player["name"])
+    await query.message.reply_text(result, parse_mode="HTML")
+
+async def send_daily_stat(bot):
+    import config
+    if not config.CHAT_ID:
+        return
+    
+    players = database.get_all_players()
+    
+    if not players:
+        return
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"stat_{today}"
+    
+    if cache_key in _stat_cache:
+        stat_type, player_name, stat_value, description = _stat_cache[cache_key]
+    else:
+        client = leetify_client.client
+        player_data = []
+        
+        for player in players:
+            profile = client.get_player_profile(player["leetify_id"])
+            if profile and "error" not in profile:
+                player_data.append({
+                    "name": player["name"],
+                    "profile": profile
+                })
+        
+        if not player_data:
+            return
+        
+        stat_types = ["hs", "adr", "rating", "winrate", "matches", "kd", "clutch", "multi"]
+        stat_type = random.choice(stat_types)
+        
+        best_player = None
+        best_value = -1
+        stat_value = "0"
+        description = "stat"
+        
+        for p in player_data:
+            profile = p["profile"]
+            
+            if stat_type == "hs":
+                hs = profile.get("headshot_percentage", 0) * 100
+                if hs > best_value:
+                    best_value = hs
+                    best_player = p["name"]
+                    stat_value = f"{hs:.1f}%"
+                    description = "headshot percentage"
+            
+            elif stat_type == "adr":
+                adr = profile.get("adr", 0)
+                if adr > best_value:
+                    best_value = adr
+                    best_player = p["name"]
+                    stat_value = f"{adr:.1f}"
+                    description = "average damage per round"
+            
+            elif stat_type == "rating":
+                rating = profile.get("ranks", {}).get("leetify", 0)
+                if rating > best_value:
+                    best_value = rating
+                    best_player = p["name"]
+                    stat_value = f"{rating:.2f}"
+                    description = "Leetify rating"
+            
+            elif stat_type == "winrate":
+                wr = profile.get("winrate", 0) * 100
+                matches = profile.get("total_matches", 0)
+                if matches >= 10 and wr > best_value:
+                    best_value = wr
+                    best_player = p["name"]
+                    stat_value = f"{wr:.1f}%"
+                    description = "win rate"
+            
+            elif stat_type == "matches":
+                matches = profile.get("total_matches", 0)
+                if matches > best_value:
+                    best_value = matches
+                    best_player = p["name"]
+                    stat_value = str(matches)
+                    description = "total matches"
+            
+            elif stat_type == "kd":
+                kills = profile.get("total_kills", 0)
+                deaths = profile.get("total_deaths", 1)
+                kd = kills / deaths if deaths > 0 else 0
+                if kd > best_value:
+                    best_value = kd
+                    best_player = p["name"]
+                    stat_value = f"{kd:.2f}"
+                    description = "K/D ratio"
+            
+            elif stat_type == "clutch":
+                clutches = profile.get("clutch_1v1_wins", 0) + profile.get("clutch_1v2_wins", 0) + profile.get("clutch_1v3_wins", 0)
+                if clutches > best_value:
+                    best_value = clutches
+                    best_player = p["name"]
+                    stat_value = str(clutches)
+                    description = "clutch wins"
+            
+            elif stat_type == "multi":
+                multi = profile.get("multi_2k", 0) + profile.get("multi_3k", 0) + profile.get("multi_4k", 0) + profile.get("multi_5k", 0)
+                if multi > best_value:
+                    best_value = multi
+                    best_player = p["name"]
+                    stat_value = str(multi)
+                    description = "multi-kills"
+        
+        if not best_player:
+            return
+        
+        player_name = best_player
+        _stat_cache[cache_key] = (stat_type, player_name, stat_value, description)
+    
+    emojis = {
+        "hs": "🎯",
+        "adr": "💥",
+        "rating": "⭐",
+        "winrate": "🏆",
+        "matches": "🎮",
+        "kd": "⚔️",
+        "clutch": "😱",
+        "multi": "🔥"
+    }
+    
+    emoji = emojis.get(stat_type, "📊")
+    
+    text = (
+        f"<b>🎲 Stat of the Day</b>\n"
+        "═" * 25 + "\n\n"
+        f"{emoji} <b>{player_name}</b>\n"
+        f"Has the highest <b>{description}</b> on the team!\n\n"
+        f"📈 Value: <code>{stat_value}</code>"
+    )
+    
+    try:
+        await bot.send_message(chat_id=config.CHAT_ID, text=text, parse_mode="HTML")
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to send stat of the day: {e}")
+
+async def test_weekly_analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import weekly_digest
+    
+    await update.message.reply_text(
+        "<b>🔄 Sending weekly analysis...</b>",
+        parse_mode="HTML"
+    )
+    
+    await weekly_digest.send_weekly_analysis(update.message.bot)
+
+async def test_stat_of_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>🔄 Sending stat of the day...</b>",
+        parse_mode="HTML"
+    )
+    
+    await send_daily_stat(update.message.bot)
+
+async def test_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    
+    if not players:
+        await update.message.reply_text(
+            "<b>❌ No players tracked.</b>",
+            parse_mode="HTML"
+        )
+        return
+    
+    player = players[0]
+    client = leetify_client.client
+    profile = client.get_player_profile(player["leetify_id"])
+    
+    if not profile or "error" in profile:
+        await update.message.reply_text(
+            "<b>❌ Could not fetch player profile.</b>",
+            parse_mode="HTML"
+        )
+        return
+    
+    await send_ai_analysis(update, profile, player["name"])
 
 async def map_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     players = database.get_all_players()
@@ -326,324 +1156,79 @@ async def map_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("<b>❌ Failed to fetch player stats.</b>", parse_mode="HTML")
             return
         
-        recent_matches = profile.get("recent_matches", [])
-        
-        if not recent_matches:
-            await update.message.reply_text(f"<b>No map data available for {player['name']}.</b>", parse_mode="HTML")
-            return
-        
         text = formatters.format_player_map_stats(profile, player["name"])
         await update.message.reply_text(text, parse_mode="HTML")
-    
-    else:
-        if not players:
-            await update.message.reply_text("<b>No tracked players.</b>", parse_mode="HTML")
-            return
-        
-        keyboard = []
-        for p in players:
-            keyboard.append([InlineKeyboardButton(p["name"], callback_data=f"map_{p['id']}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "<b>Select a player to see map stats:</b>",
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-
-async def map_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    player_id = int(query.data.split("_")[1])
-    player = database.get_player_by_internal_id(player_id)
-    
-    if not player:
-        await query.edit_message_text("<b>Player not found.</b>", parse_mode="HTML")
         return
-    
-    client = leetify_client.client
-    profile = client.get_player_profile(player["leetify_id"])
-    
-    if not profile or "error" in profile:
-        await query.edit_message_text("<b>Failed to fetch player stats.</b>", parse_mode="HTML")
-        return
-    
-    text = formatters.format_player_map_stats(profile, player["name"])
-    await query.edit_message_text(text, parse_mode="HTML")
-
-async def match_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    players = database.get_all_players()
     
     if not players:
-        await update.message.reply_text("<b>No tracked players.</b>", parse_mode="HTML")
+        await update.message.reply_text("<b>No players tracked.</b>", parse_mode="HTML")
         return
     
     if len(players) == 1:
-        await show_match_list(update, players[0])
+        profile = client.get_player_profile(players[0]["leetify_id"])
+        if profile and "error" not in profile:
+            text = formatters.format_player_map_stats(profile, players[0]["name"])
+            await update.message.reply_text(text, parse_mode="HTML")
+        else:
+            await update.message.reply_text("<b>Could not fetch stats.</b>", parse_mode="HTML")
+        return
+    
+    keyboard = []
+    for p in players:
+        keyboard.append([InlineKeyboardButton(p["name"], callback_data=f"map_{p['id']}")])
+    
+    await update.message.reply_text(
+        "Select a player:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def match_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    players = database.get_all_players()
+    client = leetify_client.client
+    
+    if context.args:
+        name = " ".join(context.args)
+        player = database.get_player_by_name(name)
+        
+        if not player:
+            await update.message.reply_text(f"<b>❌ Player '{name}' not found.</b>", parse_mode="HTML")
+            return
+        
+        profile = client.get_player_profile(player["leetify_id"])
+        
+        if not profile or "error" in profile:
+            await update.message.reply_text("<b>❌ Failed to fetch player matches.</b>", parse_mode="HTML")
+            return
+        
+        recent_matches = profile.get("recent_matches", [])
+        
+        if not recent_matches:
+            await update.message.reply_text(f"<b>No recent matches for {player['name']}.</b>", parse_mode="HTML")
+            return
+        
+        text = formatters.format_match_list(recent_matches, player["name"])
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+    
+    if not players:
+        await update.message.reply_text("<b>No players tracked.</b>", parse_mode="HTML")
+        return
+    
+    if len(players) == 1:
+        profile = client.get_player_profile(players[0]["leetify_id"])
+        if profile and "error" not in profile:
+            recent_matches = profile.get("recent_matches", [])
+            text = formatters.format_match_list(recent_matches, players[0]["name"])
+            await update.message.reply_text(text, parse_mode="HTML")
+        else:
+            await update.message.reply_text("<b>Could not fetch matches.</b>", parse_mode="HTML")
         return
     
     keyboard = []
     for p in players:
         keyboard.append([InlineKeyboardButton(p["name"], callback_data=f"match_{p['id']}")])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
-        "<b>Select a player to see recent matches:</b>",
-        reply_markup=reply_markup,
-        parse_mode="HTML"
+        "Select a player:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-async def show_match_list(update: Update, player: dict):
-    client = leetify_client.client
-    
-    profile = client.get_player_profile(player["leetify_id"])
-    
-    if not profile or "error" in profile:
-        msg = f"❌ Could not fetch matches for {player['name']}"
-        if update.message:
-            await update.message.reply_text(msg, parse_mode="HTML")
-        return
-    
-    recent_matches = profile.get("recent_matches", [])
-    
-    if not recent_matches:
-        msg = f"No recent matches for {player['name']}"
-        if update.message:
-            await update.message.reply_text(msg, parse_mode="HTML")
-        return
-    
-    keyboard = []
-    for i, match in enumerate(recent_matches[:10], 1):
-        map_name = match.get("map_name", "Unknown")
-        outcome = match.get("outcome", "Unknown")
-        score = match.get("score", [0, 0])
-        finished_at = match.get("finished_at", "")
-        date_str = ""
-        if finished_at:
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
-                date_str = dt.strftime("%m/%d %H:%M")
-            except:
-                pass
-        
-        emoji = "W" if outcome == "win" else "L"
-        rating = match.get("leetify_rating", 0)
-        r_emoji = "🟢" if rating > 0 else "🔴" if rating < 0 else "🟡"
-        label = f"{emoji} {map_name} {score[0]}-{score[1]} {r_emoji}{rating:.2f} ({date_str})"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"matchdetail_{player['id']}_{i-1}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.message:
-        await update.message.reply_text(
-            f"<b>Select a match for {player['name']}:</b>",
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-    else:
-        await update.callback_query.message.reply_text(
-            f"<b>Select a match for {player['name']}:</b>",
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-
-async def match_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    parts = query.data.split("_")
-    player_id = int(parts[1])
-    player = database.get_player_by_internal_id(player_id)
-    
-    if not player:
-        await query.edit_message_text("<b>Player not found.</b>", parse_mode="HTML")
-        return
-    
-    await show_match_list(query, player)
-
-async def match_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    parts = query.data.split("_")
-    player_id = int(parts[1])
-    match_index = int(parts[2])
-    
-    player = database.get_player_by_internal_id(player_id)
-    if not player:
-        await query.edit_message_text("<b>Player not found.</b>", parse_mode="HTML")
-        return
-    
-    client = leetify_client.client
-    profile = client.get_player_profile(player["leetify_id"])
-    
-    if not profile or "error" in profile:
-        await query.edit_message_text("<b>Could not fetch player data.</b>", parse_mode="HTML")
-        return
-    
-    recent_matches = profile.get("recent_matches", [])
-    if match_index >= len(recent_matches):
-        await query.edit_message_text("<b>Match not found.</b>", parse_mode="HTML")
-        return
-    
-    match_data = recent_matches[match_index]
-    game_id = match_data.get("id", "")
-    
-    match_details = client.get_match_details(game_id)
-    
-    if not match_details:
-        await query.edit_message_text("<b>Could not fetch match details.</b>", parse_mode="HTML")
-        return
-    
-    lines = format_full_match_details(match_details, player["leetify_id"])
-    msg = "\n".join(lines)
-    
-    if len(msg) > 4000:
-        msg = msg[:4000] + "\n\n... (truncated)"
-    
-    await query.edit_message_text(msg, parse_mode="HTML")
-
-def format_full_match_details(match_data: dict, player_id: str):
-    from datetime import datetime
-    
-    game_id = match_data.get("id", "Unknown")
-    finished_at = match_data.get("finished_at", "")
-    if finished_at:
-        try:
-            dt = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
-            date = dt.strftime("%Y-%m-%d %H:%M")
-        except:
-            date = finished_at
-    else:
-        date = "Unknown"
-    
-    map_name = match_data.get("map_name", "Unknown")
-    
-    team_scores = match_data.get("team_scores", [])
-    score_str = "0-0"
-    if team_scores:
-        scores = [ts.get("score", 0) for ts in team_scores]
-        if len(scores) >= 2:
-            score_str = f"{scores[0]}-{scores[1]}"
-    
-    match_link = f"https://leetify.com/app/match/{game_id}"
-    
-    stats = match_data.get("stats", [])
-    
-    player_stats = None
-    player_team = None
-    for p in stats:
-        if p.get("steam64_id") == player_id:
-            player_stats = p
-            player_team = p.get("initial_team_number")
-            break
-    
-    lines = [
-        f"<b>🎮 MATCH DETAILS</b>",
-        "═" * 30,
-        f"📅 {date}",
-        f"🗺️ {map_name} | <b>Score:</b> {score_str}",
-        f"<a href='{match_link}'>📊 View on Leetify</a>",
-        ""
-    ]
-    
-    if player_stats:
-        name = player_stats.get("name", "Unknown")
-        kills = player_stats.get("total_kills", 0)
-        deaths = player_stats.get("total_deaths", 0)
-        kd_ratio = player_stats.get("kd_ratio", 0)
-        adr = player_stats.get("total_damage", 0) / 24 if player_stats.get("rounds_count", 0) > 0 else 0
-        adr = round(adr, 1)
-        
-        leetify_rating = player_stats.get("leetify_rating", 0)
-        ct_rating = player_stats.get("ct_leetify_rating", 0)
-        t_rating = player_stats.get("t_leetify_rating", 0)
-        
-        hs = player_stats.get("accuracy_head", 0) * 100 if player_stats.get("accuracy_head", 0) else 0
-        spray = player_stats.get("spray_accuracy", 0) * 100 if player_stats.get("spray_accuracy", 0) else 0
-        
-        mvps = player_stats.get("mvps", 0)
-        assists = player_stats.get("total_assists", 0)
-        
-        rounds_won = player_stats.get("rounds_won", 0)
-        rounds_lost = player_stats.get("rounds_lost", 0)
-        
-        preaim = player_stats.get("preaim", 0)
-        reaction = player_stats.get("reaction_time", 0)
-        
-        multi1k = player_stats.get("multi1k", 0)
-        multi2k = player_stats.get("multi2k", 0)
-        multi3k = player_stats.get("multi3k", 0)
-        
-        lines.append(f"<b>{name}</b>")
-        
-        is_win = False
-        if team_scores and player_team:
-            team_score = next((ts for ts in team_scores if ts.get("team_number") == player_team), None)
-            if team_score:
-                max_score = max(ts.get("score", 0) for ts in team_scores)
-                is_win = team_score.get("score", 0) == max_score
-        
-        if is_win:
-            lines.append("<b>✅ WIN</b>")
-        else:
-            lines.append("<b>❌ LOSE</b>")
-        lines.append("")
-        
-        lines.append("<b>📊 OVERVIEW:</b>")
-        lines.append(f"  Kills: <code>{kills}</code>")
-        lines.append(f"  Deaths: <code>{deaths}</code>")
-        lines.append(f"  K/D: <code>{round(kd_ratio, 2)}</code>")
-        lines.append(f"  ADR: <code>{adr}</code>")
-        lines.append(f"  Assists: <code>{assists}</code>")
-        lines.append(f"  MVPs: <code>{mvps}</code>")
-        lines.append("")
-        
-        lines.append("<b>⭐ RATING:</b>")
-        lines.append(f"  Overall: <code>{round(leetify_rating, 2)}</code>")
-        lines.append(f"  CT Side: <code>{round(ct_rating, 2)}</code>")
-        lines.append(f"  T Side: <code>{round(t_rating, 2)}</code>")
-        lines.append("")
-        
-        lines.append("<b>🎯 DETAILED STATS:</b>")
-        lines.append(f"  Headshot: <code>{round(hs, 1)}%</code>")
-        lines.append(f"  Spray: <code>{round(spray, 1)}%</code>")
-        lines.append(f"  Pre-aim: <code>{round(preaim, 1)}%</code>")
-        lines.append(f"  Reaction: <code>{round(reaction * 1000)}ms</code>")
-        lines.append("")
-        
-        lines.append("<b>🎮 ROUNDS:</b>")
-        lines.append(f"  Won: <code>{rounds_won}</code>")
-        lines.append(f"  Lost: <code>{rounds_lost}</code>")
-        lines.append("")
-        
-        if multi1k or multi2k or multi3k:
-            lines.append("<b>💪 MULTI-KILLS:</b>")
-            if multi1k:
-                lines.append(f"  1K: <code>{multi1k}</code>")
-            if multi2k:
-                lines.append(f"  2K: <code>{multi2k}</code>")
-            if multi3k:
-                lines.append(f"  3K: <code>{multi3k}</code>")
-            lines.append("")
-    
-    lines.append("═" * 30)
-    lines.append("<b>👥 ALL PLAYERS:</b>")
-    
-    for p in sorted(stats, key=lambda x: x.get("total_kills", 0), reverse=True)[:10]:
-        pname = p.get("name", "Unknown")[:15]
-        kills = p.get("total_kills", 0)
-        deaths = p.get("total_deaths", 0)
-        kd = p.get("kd_ratio", 0)
-        dmg = p.get("total_damage", 0)
-        adr = round(dmg / 24, 1) if p.get("rounds_count", 0) > 0 else 0
-        rating = p.get("leetify_rating", 0)
-        mvps = p.get("mvps", 0)
-        is_mvp = " ⭐" if mvps > 0 else ""
-        lines.append(f"  {pname:<15} <code>{kills}K</code> <code>{deaths}D</code> | <code>{round(kd, 1)}</code> KD | <code>{adr}</code> ADR | <code>{round(rating, 2)}</code> R{is_mvp}")
-    
-    return lines

@@ -22,7 +22,9 @@ def init_db():
             faceit_id TEXT,
             name TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_by_user_id INTEGER,
+            added_by_username TEXT
         )
     """)
     
@@ -62,13 +64,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_player(leetify_id: str, steam_id: str, name: str, faceit_id: str = "") -> bool:
+def add_player(leetify_id: str, steam_id: str, name: str, faceit_id: str = "", added_by_user_id: int = None, added_by_username: str = "") -> bool:
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO players (leetify_id, steam_id, faceit_id, name) VALUES (?, ?, ?, ?)",
-            (leetify_id, steam_id, faceit_id, name)
+            "INSERT INTO players (leetify_id, steam_id, faceit_id, name, added_by_user_id, added_by_username) VALUES (?, ?, ?, ?, ?, ?)",
+            (leetify_id, steam_id, faceit_id, name, added_by_user_id, added_by_username)
         )
         conn.commit()
         return True
@@ -106,6 +108,14 @@ def get_player_by_internal_id(internal_id: int) -> Optional[dict]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM players WHERE id = ?", (internal_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_player_added_by(leetify_id: str) -> Optional[dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT added_by_user_id, added_by_username, created_at FROM players WHERE leetify_id = ?", (leetify_id,))
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
